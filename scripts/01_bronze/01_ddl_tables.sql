@@ -47,9 +47,11 @@ CREATE TABLE bronze.olist_customers_dataset
 	customer_zip_code_prefix CHAR(5),
 	customer_city NVARCHAR(50),
 	customer_state NVARCHAR(50),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -61,9 +63,11 @@ CREATE TABLE bronze.olist_geolocation_dataset
 	geolocation_lng FLOAT,
 	geolocation_city NVARCHAR(50),
 	geolocation_state NVARCHAR(50),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -77,9 +81,11 @@ CREATE TABLE bronze.olist_order_items_dataset
 	shipping_limit_date DATETIME2(0),
 	price DECIMAL(10, 2),
 	freight_value DECIMAL(10, 2),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -91,9 +97,11 @@ CREATE TABLE bronze.olist_order_payments_dataset
 	payment_type NVARCHAR(50),
 	payment_installments INT,
 	payment_value DECIMAL(10, 2),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -107,9 +115,11 @@ CREATE TABLE bronze.olist_order_reviews_dataset
 	review_comment_message NVARCHAR(MAX),
 	review_creation_date DATETIME2(0),
 	review_answer_timestamp DATETIME2(0),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -124,9 +134,11 @@ CREATE TABLE bronze.olist_orders_dataset
 	order_delivered_carrier_date DATETIME2(0),
 	order_delivered_customer_date DATETIME2(0),
 	order_estimated_delivery_date DATETIME2(0),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -142,9 +154,11 @@ CREATE TABLE bronze.olist_products_dataset
 	product_length_cm INT,
 	product_height_cm INT,
 	product_width_cm INT,
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -155,9 +169,11 @@ CREATE TABLE bronze.olist_sellers_dataset
 	seller_zip_code_prefix CHAR(5),
 	seller_city NVARCHAR(50),
 	seller_state NVARCHAR(50),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
@@ -166,9 +182,11 @@ CREATE TABLE bronze.olist_product_category_name_translation
 (
 	product_category_name NVARCHAR(50),
 	product_category_name_english NVARCHAR(50),
-	dwh_batch_id INT,
-	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME(),
-	dwh_source_file NVARCHAR(250)
+	dwh_row_hash BINARY(32) NOT NULL,
+	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
+	dwh_batch_id INT NOT NULL,
+	dwh_source_file NVARCHAR(250) NOT NULL,
+	dwh_is_deleted BIT NOT NULL DEFAULT 0
 );
 GO
 
