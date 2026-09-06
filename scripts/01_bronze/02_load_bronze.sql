@@ -167,7 +167,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_customers_dataset FROM ''' + @source_object + 
-		''' WITH(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK	);';
+		''' WITH(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -328,7 +328,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_geolocation_dataset FROM ''' + @source_object + 
-		''' WITH (FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		''' WITH (FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -471,7 +471,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @SQL = 'BULK INSERT #staging_olist_order_items_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -638,7 +638,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_order_payments_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -800,7 +800,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_order_reviews_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -971,7 +971,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_orders_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -1140,7 +1140,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_product_name_translation FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -1294,7 +1294,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_products_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
@@ -1465,7 +1465,7 @@ BEGIN
 
 		-- Map BULK INSERT statement to variable @sql
 		SET @sql = 'BULK INSERT #staging_olist_sellers_dataset FROM ''' + @source_object + ''' WITH 
-		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK);';
+		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
