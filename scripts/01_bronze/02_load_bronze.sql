@@ -30,6 +30,9 @@ CREATE OR ALTER PROCEDURE bronze.load_bronze @batch_id INT = NULL AS
 BEGIN
 	-- Suppress number of rows affected
 	SET NOCOUNT ON;
+
+	-- Abort transaction when an error occurs
+	SET XACT_ABORT ON;
  
 	-- =======================================================================================
 	-- SECTION 1: DECLARE ALL VARIABLES
@@ -57,10 +60,11 @@ BEGIN
 	@step_end_time DATETIME2(0),
 	@step_load_duration INT,
 	@step_load_status NVARCHAR(50),
-	@rows_extracted INT,
-	@rows_inserted INT,
-	@rows_updated INT,
-	@rows_rejected INT,
+	@rows_extracted INT = 0,
+	@rows_inserted INT = 0,
+	@rows_updated INT = 0,
+	@rows_unchanged INT = 0,
+	@rows_flagged INT = 0,
 
 	-- Holds error time 
 	@error_time DATETIME2(0),
@@ -104,6 +108,10 @@ BEGIN
 	-- SECTION 3: LOAD ALL BRONZE TABLES
 	-- =======================================================================================
 	BEGIN TRY
+		-- Verify existence of @batch_id in batch log table and return an error if not found
+		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
+		THROW 50010, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
+		
 		-- ========================================================
 		-- STEP 1: Load Olist Customers Dataset 
 		-- ========================================================
@@ -118,7 +126,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -134,7 +143,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -149,7 +159,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -175,79 +186,95 @@ BEGIN
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_customers_dataset
 		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
-		COALESCE(customer_id, 'N/A'), COALESCE(customer_unique_id, 'N/A'), COALESCE(customer_zip_code_prefix, 1),
-		COALESCE(customer_city, 'N/A'), COALESCE(customer_state, 'N/A'))) AS BINARY(32)) PERSISTED; 
+		COALESCE(customer_id, '<NULL>'), COALESCE(customer_unique_id, '<NULL>'), COALESCE(CAST(customer_zip_code_prefix AS NVARCHAR(10)), '<NULL>'),
+		COALESCE(customer_city, '<NULL>'), COALESCE(customer_state, '<NULL>'))) AS BINARY(32)) PERSISTED; 
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_customers_dataset;
 
-		-- Load new records from staging to target table olist_customers_dataset
-		INSERT INTO bronze.olist_customers_dataset
-		(
-			customer_id,
-			customer_unique_id,
-			customer_zip_code_prefix,
-			customer_city,
-			customer_state,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.customer_id,
-			src.customer_unique_id,
-			src.customer_zip_code_prefix,
-			src.customer_city,
-			src.customer_state,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_customers_dataset src
-		LEFT JOIN bronze.olist_customers_dataset tgt
-		ON src.customer_unique_id = tgt.customer_unique_id
-		AND src.customer_id = tgt.customer_id
-		WHERE tgt.customer_unique_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.customer_zip_code_prefix = src.customer_zip_code_prefix,
-				tgt.customer_city = src.customer_city,
-				tgt.customer_state = src.customer_state,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_customers_dataset
+			INSERT INTO bronze.olist_customers_dataset
+			(
+				customer_id,
+				customer_unique_id,
+				customer_zip_code_prefix,
+				customer_city,
+				customer_state,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.customer_id,
+				src.customer_unique_id,
+				src.customer_zip_code_prefix,
+				src.customer_city,
+				src.customer_state,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_customers_dataset src
-			INNER JOIN bronze.olist_customers_dataset tgt
+			LEFT JOIN bronze.olist_customers_dataset tgt
 			ON src.customer_unique_id = tgt.customer_unique_id
 			AND src.customer_id = tgt.customer_id
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.customer_unique_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_customers_dataset tgt 
-			LEFT JOIN #staging_olist_customers_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.customer_zip_code_prefix = src.customer_zip_code_prefix,
+					tgt.customer_city = src.customer_city,
+					tgt.customer_state = src.customer_state,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_customers_dataset src
+				INNER JOIN bronze.olist_customers_dataset tgt
+				ON src.customer_unique_id = tgt.customer_unique_id
+				AND src.customer_id = tgt.customer_id
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_customers_dataset tgt 
+				LEFT JOIN #staging_olist_customers_dataset src
+				ON tgt.customer_unique_id = src.customer_unique_id
+				AND tgt.customer_id = src.customer_id
+				WHERE src.customer_unique_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation check
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50001, 'Row-count reconciliation failed', 1;			
+		COMMIT TRAN;
+
+		-- Mark step as successful if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -258,7 +285,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id;
 
 		-- Drop staging table
@@ -279,7 +307,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -295,7 +324,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -310,7 +340,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -336,59 +367,73 @@ BEGIN
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_geolocation_dataset
 		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
-		COALESCE(geolocation_zip_code_prefix, 'N/A'), COALESCE(geolocation_lat, 1.0),
-		COALESCE(geolocation_lng, 1.0), COALESCE(geolocation_city, 'N/A'), COALESCE(geolocation_state, 'N/A'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CAST(geolocation_zip_code_prefix AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(CAST(geolocation_lat AS NVARCHAR(30)), '<NULL>'), COALESCE(CAST(geolocation_lng AS NVARCHAR(30)), '<NULL>'), 
+		COALESCE(geolocation_city, '<NULL>'), COALESCE(geolocation_state, '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_geolocation_dataset;
 
-		-- Load new records from staging to target table olist_geolocation_dataset
-		INSERT INTO bronze.olist_geolocation_dataset
-		(
-			geolocation_zip_code_prefix,
-			geolocation_lat,
-			geolocation_lng,
-			geolocation_city,
-			geolocation_state,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.geolocation_zip_code_prefix,
-			src.geolocation_lat,
-			src.geolocation_lng,
-			src.geolocation_city,
-			src.geolocation_state,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_geolocation_dataset src
-		LEFT JOIN bronze.olist_geolocation_dataset tgt
-		ON tgt.dwh_row_hash = src.dwh_row_hash
-		WHERE tgt.dwh_row_hash IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT
-
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_geolocation_dataset tgt
-			LEFT JOIN #staging_olist_geolocation_dataset src
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_geolocation_dataset
+			INSERT INTO bronze.olist_geolocation_dataset
+			(
+				geolocation_zip_code_prefix,
+				geolocation_lat,
+				geolocation_lng,
+				geolocation_city,
+				geolocation_state,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.geolocation_zip_code_prefix,
+				src.geolocation_lat,
+				src.geolocation_lng,
+				src.geolocation_city,
+				src.geolocation_state,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
+			FROM #staging_olist_geolocation_dataset src
+			LEFT JOIN bronze.olist_geolocation_dataset tgt
 			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			WHERE tgt.dwh_row_hash IS NULL;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_geolocation_dataset tgt
+				LEFT JOIN #staging_olist_geolocation_dataset src
+				ON tgt.dwh_row_hash = src.dwh_row_hash
+				WHERE src.dwh_row_hash IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - @rows_inserted;
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + @rows_inserted;
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_unchanged THROW 50002, 'Row-count reconciliation failed', 2;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - @rows_inserted;
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + @rows_inserted;
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -399,7 +444,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -420,7 +466,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -436,7 +483,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -451,7 +499,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -478,86 +527,103 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_items_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(order_id, 'N/A'), COALESCE(order_item_id, 1), 
-		COALESCE(product_id, 'N/A'), COALESCE(seller_id, 'N/A'), COALESCE(CONVERT(NVARCHAR(20), shipping_limit_date, 120), '1900-01-01'), 
-		COALESCE(price, 1.00), COALESCE(freight_value, 1.00))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(order_id, '<NULL>'), COALESCE(CAST(order_item_id AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(product_id, '<NULL>'), COALESCE(seller_id, '<NULL>'), COALESCE(CONVERT(NVARCHAR(30), shipping_limit_date, 120), '<NULL>'), 
+		COALESCE(CAST(price AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(freight_value AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_items_dataset;
 
-		-- Load new records from staging to target table olist_order_items_dataset
-		INSERT INTO bronze.olist_order_items_dataset
-		(
-			order_id,
-			order_item_id,
-			product_id,
-			seller_id,
-			shipping_limit_date,
-			price,
-			freight_value,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.order_id,
-			src.order_item_id,
-			src.product_id,
-			src.seller_id,
-			src.shipping_limit_date,
-			src.price,
-			src.freight_value,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_order_items_dataset src
-		LEFT JOIN bronze.olist_order_items_dataset tgt
-		ON src.order_id = tgt.order_id
-		AND src.order_item_id = tgt.order_item_id
-		WHERE tgt.order_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.product_id = src.product_id,
-				tgt.seller_id = src.seller_id,
-				tgt.shipping_limit_date = src.shipping_limit_date,
-				tgt.price = src.price,
-				tgt.freight_value = src.freight_value,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_order_items_dataset
+			INSERT INTO bronze.olist_order_items_dataset
+			(
+				order_id,
+				order_item_id,
+				product_id,
+				seller_id,
+				shipping_limit_date,
+				price,
+				freight_value,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.order_id,
+				src.order_item_id,
+				src.product_id,
+				src.seller_id,
+				src.shipping_limit_date,
+				src.price,
+				src.freight_value,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_order_items_dataset src
-			INNER JOIN bronze.olist_order_items_dataset tgt
+			LEFT JOIN bronze.olist_order_items_dataset tgt
 			ON src.order_id = tgt.order_id
 			AND src.order_item_id = tgt.order_item_id
-			WHERE src.dwh_row_hash <> tgt.dwh_row_hash;
+			WHERE tgt.order_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				dwh_batch_id = @batch_id,
-				dwh_source_file = @source_object,
-				dwh_is_deleted = 1
-			FROM bronze.olist_order_items_dataset tgt
-			LEFT JOIN #staging_olist_order_items_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.order_id IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.product_id = src.product_id,
+					tgt.seller_id = src.seller_id,
+					tgt.shipping_limit_date = src.shipping_limit_date,
+					tgt.price = src.price,
+					tgt.freight_value = src.freight_value,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_order_items_dataset src
+				INNER JOIN bronze.olist_order_items_dataset tgt
+				ON src.order_id = tgt.order_id
+				AND src.order_item_id = tgt.order_item_id
+				WHERE src.dwh_row_hash <> tgt.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					dwh_batch_id = @batch_id,
+					dwh_source_file = @source_object,
+					dwh_is_deleted = 1
+				FROM bronze.olist_order_items_dataset tgt
+				LEFT JOIN #staging_olist_order_items_dataset src
+				ON tgt.order_id = src.order_id
+				AND tgt.order_item_id = src.order_item_id
+				WHERE src.order_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50003, 'Row-count reconciliation failed', 3;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -568,7 +634,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -589,7 +656,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -605,7 +673,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -620,7 +689,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -645,79 +715,97 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_payments_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(order_id, 'N/A'), COALESCE(payment_sequential, 1), 
-		COALESCE(payment_type, 'N/A'), COALESCE(payment_installments, 1), COALESCE(payment_value, 1.00))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(order_id, '<NULL>'), COALESCE(CAST(payment_sequential AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(payment_type, '<NULL>'), COALESCE(CAST(payment_installments AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(CAST(payment_value AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_payments_dataset;
 
-		-- Load new records from staging to target table olist_order_payments_dataset
-		INSERT INTO bronze.olist_order_payments_dataset
-		(
-			order_id,
-			payment_sequential,
-			payment_type,
-			payment_installments,
-			payment_value,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.order_id,
-			src.payment_sequential,
-			src.payment_type,
-			src.payment_installments,
-			src.payment_value,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_order_payments_dataset src
-		LEFT JOIN bronze.olist_order_payments_dataset tgt
-		ON src.order_id = tgt.order_id
-		AND src.payment_sequential = tgt.payment_sequential
-		WHERE tgt.order_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.payment_type = src.payment_type,
-				tgt.payment_installments = src.payment_installments,
-				tgt.payment_value = src.payment_value,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_order_payments_dataset
+			INSERT INTO bronze.olist_order_payments_dataset
+			(
+				order_id,
+				payment_sequential,
+				payment_type,
+				payment_installments,
+				payment_value,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.order_id,
+				src.payment_sequential,
+				src.payment_type,
+				src.payment_installments,
+				src.payment_value,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_order_payments_dataset src
-			INNER JOIN bronze.olist_order_payments_dataset tgt
+			LEFT JOIN bronze.olist_order_payments_dataset tgt
 			ON src.order_id = tgt.order_id
 			AND src.payment_sequential = tgt.payment_sequential
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.order_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_order_payments_dataset tgt
-			LEFT JOIN #staging_olist_order_payments_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.payment_type = src.payment_type,
+					tgt.payment_installments = src.payment_installments,
+					tgt.payment_value = src.payment_value,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_order_payments_dataset src
+				INNER JOIN bronze.olist_order_payments_dataset tgt
+				ON src.order_id = tgt.order_id
+				AND src.payment_sequential = tgt.payment_sequential
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_order_payments_dataset tgt
+				LEFT JOIN #staging_olist_order_payments_dataset src
+				ON tgt.order_id = src.order_id
+				AND tgt.payment_sequential = src.payment_sequential
+				WHERE src.order_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50004, 'Row-count reconciliation failed', 4;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -728,7 +816,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -749,7 +838,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -765,7 +855,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -780,7 +871,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -807,87 +899,104 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_reviews_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(review_id, 'N/A'), COALESCE(order_id, 'N/A'), COALESCE(review_score, 1), 
-		COALESCE(review_comment_title, 'N/A'), COALESCE(review_comment_message, 'N/A'),
-		COALESCE(CONVERT(NVARCHAR(20), review_creation_date, 120), '1900-01-01'), COALESCE(CONVERT(NVARCHAR(20), 
-		review_answer_timestamp, 120), '1900-01-01'))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(review_id, '<NULL>'), COALESCE(order_id, '<NULL>'), COALESCE(CAST(review_score AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(review_comment_title, '<NULL>'), COALESCE(review_comment_message, '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), review_creation_date, 120), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), review_answer_timestamp, 120), '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_reviews_dataset;
 
-		-- Load new records from staging to target table olist_order_reviews_dataset
-		INSERT INTO bronze.olist_order_reviews_dataset
-		(
-			review_id,
-			order_id,
-			review_score,
-			review_comment_title,
-			review_comment_message,
-			review_creation_date,
-			review_answer_timestamp,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.review_id,
-			src.order_id,
-			src.review_score,
-			src.review_comment_title,
-			src.review_comment_message,
-			src.review_creation_date,
-			src.review_answer_timestamp,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_order_reviews_dataset src
-		LEFT JOIN bronze.olist_order_reviews_dataset tgt
-		ON src.review_id = tgt.review_id
-		AND src.order_id = tgt.order_id
-		WHERE tgt.review_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.review_score = src.review_score,
-				tgt.review_comment_title = src.review_comment_title,
-				tgt.review_comment_message = src.review_comment_message,
-				tgt.review_creation_date = src.review_creation_date,
-				tgt.review_answer_timestamp = src.review_answer_timestamp,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_order_reviews_dataset
+			INSERT INTO bronze.olist_order_reviews_dataset
+			(
+				review_id,
+				order_id,
+				review_score,
+				review_comment_title,
+				review_comment_message,
+				review_creation_date,
+				review_answer_timestamp,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.review_id,
+				src.order_id,
+				src.review_score,
+				src.review_comment_title,
+				src.review_comment_message,
+				src.review_creation_date,
+				src.review_answer_timestamp,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_order_reviews_dataset src
-			INNER JOIN bronze.olist_order_reviews_dataset tgt
+			LEFT JOIN bronze.olist_order_reviews_dataset tgt
 			ON src.review_id = tgt.review_id
 			AND src.order_id = tgt.order_id
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.review_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_order_reviews_dataset tgt
-			LEFT JOIN #staging_olist_order_reviews_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.review_score = src.review_score,
+					tgt.review_comment_title = src.review_comment_title,
+					tgt.review_comment_message = src.review_comment_message,
+					tgt.review_creation_date = src.review_creation_date,
+					tgt.review_answer_timestamp = src.review_answer_timestamp,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_order_reviews_dataset src
+				INNER JOIN bronze.olist_order_reviews_dataset tgt
+				ON src.review_id = tgt.review_id
+				AND src.order_id = tgt.order_id
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_order_reviews_dataset tgt
+				LEFT JOIN #staging_olist_order_reviews_dataset src
+				ON tgt.review_id = src.review_id
+				AND tgt.order_id = src.order_id
+				WHERE src.review_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50005, 'Row-count reconciliation failed', 5;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -898,7 +1007,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -919,7 +1029,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -935,7 +1046,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -950,7 +1062,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -978,91 +1091,107 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_orders_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(order_id, 'N/A'), COALESCE(customer_id, 'N/A'), COALESCE(order_status, 'N/A'), 
-		COALESCE(CONVERT(NVARCHAR(20), order_purchase_timestamp, 120), '1900-01-01'), 
-		COALESCE(CONVERT(NVARCHAR(20), order_approved_at, 120), '1900-01-01'), 
-		COALESCE(CONVERT(NVARCHAR(20), order_delivered_carrier_date, 120), '1900-01-01'), 
-		COALESCE(CONVERT(NVARCHAR(20), order_delivered_customer_date, 120), '1900-01-01'), 
-		COALESCE(CONVERT(NVARCHAR(20), order_estimated_delivery_date, 120), '1900-01-01'))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(order_id, '<NULL>'), COALESCE(customer_id, '<NULL>'), COALESCE(order_status, '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), order_purchase_timestamp, 120), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), order_approved_at, 120), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), order_delivered_carrier_date, 120), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), order_delivered_customer_date, 120), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), order_estimated_delivery_date, 120), '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_orders_dataset;
 
-		-- Load new records from staging to target table olist_orders_dataset
-		INSERT INTO bronze.olist_orders_dataset
-		(
-			order_id,
-			customer_id,
-			order_status,
-			order_purchase_timestamp,
-			order_approved_at,
-			order_delivered_carrier_date,
-			order_delivered_customer_date,
-			order_estimated_delivery_date,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.order_id,
-			src.customer_id,
-			src.order_status,
-			src.order_purchase_timestamp,
-			src.order_approved_at,
-			src.order_delivered_carrier_date,
-			src.order_delivered_customer_date,
-			src.order_estimated_delivery_date,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_orders_dataset src
-		LEFT JOIN bronze.olist_orders_dataset tgt
-		ON src.order_id = tgt.order_id
-		WHERE tgt.order_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.customer_id = src.customer_id,
-				tgt.order_status = src.order_status,
-				tgt.order_purchase_timestamp = src.order_purchase_timestamp,
-				tgt.order_approved_at = src.order_approved_at,
-				tgt.order_delivered_carrier_date = src.order_delivered_carrier_date,
-				tgt.order_delivered_customer_date = src.order_delivered_customer_date,
-				tgt.order_estimated_delivery_date = src.order_estimated_delivery_date,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_orders_dataset
+			INSERT INTO bronze.olist_orders_dataset
+			(
+				order_id,
+				customer_id,
+				order_status,
+				order_purchase_timestamp,
+				order_approved_at,
+				order_delivered_carrier_date,
+				order_delivered_customer_date,
+				order_estimated_delivery_date,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.order_id,
+				src.customer_id,
+				src.order_status,
+				src.order_purchase_timestamp,
+				src.order_approved_at,
+				src.order_delivered_carrier_date,
+				src.order_delivered_customer_date,
+				src.order_estimated_delivery_date,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_orders_dataset src
-			INNER JOIN bronze.olist_orders_dataset tgt
+			LEFT JOIN bronze.olist_orders_dataset tgt
 			ON src.order_id = tgt.order_id
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.order_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_orders_dataset tgt
-			LEFT JOIN #staging_olist_orders_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.customer_id = src.customer_id,
+					tgt.order_status = src.order_status,
+					tgt.order_purchase_timestamp = src.order_purchase_timestamp,
+					tgt.order_approved_at = src.order_approved_at,
+					tgt.order_delivered_carrier_date = src.order_delivered_carrier_date,
+					tgt.order_delivered_customer_date = src.order_delivered_customer_date,
+					tgt.order_estimated_delivery_date = src.order_estimated_delivery_date,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_orders_dataset src
+				INNER JOIN bronze.olist_orders_dataset tgt
+				ON src.order_id = tgt.order_id
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
+
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_orders_dataset tgt
+				LEFT JOIN #staging_olist_orders_dataset src
+				ON tgt.order_id = src.order_id
+				WHERE src.order_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
 	
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50006, 'Row-count reconciliation failed', 6;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1073,7 +1202,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -1094,7 +1224,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -1110,7 +1241,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -1125,7 +1257,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -1147,69 +1280,85 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_product_name_translation
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(product_category_name, 'N/A'), 
-		COALESCE(product_category_name_english, 'N/A'))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(product_category_name, '<NULL>'), 
+		COALESCE(product_category_name_english, '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_product_name_translation;
 
-		-- Load new records from staging to target table olist_product_category_name_translation
-		INSERT INTO bronze.olist_product_category_name_translation
-		(
-			product_category_name,
-			product_category_name_english,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.product_category_name,
-			src.product_category_name_english,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_product_name_translation src
-		LEFT JOIN bronze.olist_product_category_name_translation tgt
-		ON src.product_category_name = tgt.product_category_name
-		WHERE tgt.product_category_name IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.product_category_name_english = src.product_category_name_english,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_product_category_name_translation
+			INSERT INTO bronze.olist_product_category_name_translation
+			(
+				product_category_name,
+				product_category_name_english,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.product_category_name,
+				src.product_category_name_english,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_product_name_translation src
-			INNER JOIN bronze.olist_product_category_name_translation tgt
+			LEFT JOIN bronze.olist_product_category_name_translation tgt
 			ON src.product_category_name = tgt.product_category_name
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.product_category_name IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_product_category_name_translation tgt
-			LEFT JOIN #staging_olist_product_name_translation src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.product_category_name_english = src.product_category_name_english,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_product_name_translation src
+				INNER JOIN bronze.olist_product_category_name_translation tgt
+				ON src.product_category_name = tgt.product_category_name
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
+
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_product_category_name_translation tgt
+				LEFT JOIN #staging_olist_product_name_translation src
+				ON tgt.product_category_name = src.product_category_name
+				WHERE src.product_category_name IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
 	
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50007, 'Row-count reconciliation failed', 7;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1220,7 +1369,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -1241,7 +1391,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -1257,7 +1408,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -1272,7 +1424,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -1301,91 +1454,109 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_products_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(product_id, 'N/A'), COALESCE(product_category_name, 'N/A'),
-		COALESCE(product_name_length, 1), COALESCE(product_description_length, 1), COALESCE(product_photos_qty, 1), COALESCE(product_weight_g, 1), 
-		COALESCE(product_length_cm, 1), COALESCE(product_height_cm, 1), COALESCE(product_width_cm, 1))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', 
+		CONCAT_WS('|', COALESCE(product_id, '<NULL>'), COALESCE(product_category_name, '<NULL>'),
+		COALESCE(CAST(product_name_length AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_description_length AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(CAST(product_photos_qty AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_weight_g AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(CAST(product_length_cm AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_height_cm AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(CAST(product_width_cm AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_products_dataset;
 
-		-- Load new records from staging to target table olist_products_dataset
-		INSERT INTO bronze.olist_products_dataset
-		(
-			product_id,
-			product_category_name,
-			product_name_length,
-			product_description_length,
-			product_photos_qty,
-			product_weight_g,
-			product_length_cm,
-			product_height_cm,
-			product_width_cm,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.product_id,
-			src.product_category_name,
-			src.product_name_length,
-			src.product_description_length,
-			src.product_photos_qty,
-			src.product_weight_g,
-			src.product_length_cm,
-			src.product_height_cm,
-			src.product_width_cm,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_products_dataset src
-		LEFT JOIN bronze.olist_products_dataset tgt
-		ON src.product_id = tgt.product_id
-		WHERE tgt.product_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.product_category_name = src.product_category_name,
-				tgt.product_name_length = src.product_name_length,
-				tgt.product_description_length = src.product_description_length,
-				tgt.product_photos_qty = src.product_photos_qty,
-				tgt.product_weight_g = src.product_weight_g,
-				tgt.product_length_cm = src.product_length_cm,
-				tgt.product_height_cm = src.product_height_cm,
-				tgt.product_width_cm = src.product_width_cm,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_products_dataset
+			INSERT INTO bronze.olist_products_dataset
+			(
+				product_id,
+				product_category_name,
+				product_name_length,
+				product_description_length,
+				product_photos_qty,
+				product_weight_g,
+				product_length_cm,
+				product_height_cm,
+				product_width_cm,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.product_id,
+				src.product_category_name,
+				src.product_name_length,
+				src.product_description_length,
+				src.product_photos_qty,
+				src.product_weight_g,
+				src.product_length_cm,
+				src.product_height_cm,
+				src.product_width_cm,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_products_dataset src
-			INNER JOIN bronze.olist_products_dataset tgt
+			LEFT JOIN bronze.olist_products_dataset tgt
 			ON src.product_id = tgt.product_id
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.product_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_products_dataset tgt
-			LEFT JOIN #staging_olist_products_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.product_category_name = src.product_category_name,
+					tgt.product_name_length = src.product_name_length,
+					tgt.product_description_length = src.product_description_length,
+					tgt.product_photos_qty = src.product_photos_qty,
+					tgt.product_weight_g = src.product_weight_g,
+					tgt.product_length_cm = src.product_length_cm,
+					tgt.product_height_cm = src.product_height_cm,
+					tgt.product_width_cm = src.product_width_cm,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_products_dataset src
+				INNER JOIN bronze.olist_products_dataset tgt
+				ON src.product_id = tgt.product_id
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_products_dataset tgt
+				LEFT JOIN #staging_olist_products_dataset src
+				ON tgt.product_id = src.product_id
+				WHERE src.product_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50008, 'Row-count reconciliation failed', 8;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1396,7 +1567,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -1417,7 +1589,8 @@ BEGIN
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_rejected = 0;
+		SET @rows_unchanged = 0;
+		SET @rows_flagged = 0;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -1433,7 +1606,8 @@ BEGIN
 			rows_extracted,
 			rows_inserted,
 			rows_updated,
-			rows_rejected
+			rows_unchanged,
+			rows_flagged
 		)
 		VALUES
 		(
@@ -1448,7 +1622,8 @@ BEGIN
 			@rows_extracted,
 			@rows_inserted,
 			@rows_updated,
-			@rows_rejected
+			@rows_unchanged,
+			@rows_flagged
 		);
 
 		-- Retrieve recently generated step id
@@ -1472,75 +1647,91 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_sellers_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', COALESCE(seller_id, 'N/A'), COALESCE(seller_zip_code_prefix, 'N/A'), 
-		COALESCE(seller_city, 'N/A'), COALESCE(seller_state, 'N/A'))) AS BINARY(32)) PERSISTED;
+		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		COALESCE(seller_id, '<NULL>'), COALESCE(CAST(seller_zip_code_prefix AS NVARCHAR(10)), '<NULL>'), 
+		COALESCE(seller_city, '<NULL>'), COALESCE(seller_state, '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_sellers_dataset;
 
-		-- Load new records from staging to target table olist_sellers_dataset
-		INSERT INTO bronze.olist_sellers_dataset
-		(
-			seller_id,
-			seller_zip_code_prefix,
-			seller_city,
-			seller_state,
-			dwh_row_hash,
-			dwh_batch_id,
-			dwh_source_file
-		)
-		SELECT
-			src.seller_id,
-			src.seller_zip_code_prefix,
-			src.seller_city,
-			src.seller_state,
-			src.dwh_row_hash,
-			@batch_id,
-			@source_object
-		FROM #staging_olist_sellers_dataset src
-		LEFT JOIN bronze.olist_sellers_dataset tgt
-		ON src.seller_id = tgt.seller_id
-		WHERE tgt.seller_id IS NULL;
-
-		-- Retrieve rows inserted
-		SET @rows_inserted = @@ROWCOUNT;
-
-		-- Update outdated records in bronze table
-		UPDATE tgt
-			SET
-				tgt.seller_zip_code_prefix = src.seller_zip_code_prefix,
-				tgt.seller_city = src.seller_city,
-				tgt.seller_state = src.seller_state,
-				tgt.dwh_row_hash = src.dwh_row_hash,
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 0
+		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
+		BEGIN TRAN;
+			-- Load new records from staging to target table olist_sellers_dataset
+			INSERT INTO bronze.olist_sellers_dataset
+			(
+				seller_id,
+				seller_zip_code_prefix,
+				seller_city,
+				seller_state,
+				dwh_row_hash,
+				dwh_batch_id,
+				dwh_source_file
+			)
+			SELECT
+				src.seller_id,
+				src.seller_zip_code_prefix,
+				src.seller_city,
+				src.seller_state,
+				src.dwh_row_hash,
+				@batch_id,
+				@source_object
 			FROM #staging_olist_sellers_dataset src
-			INNER JOIN bronze.olist_sellers_dataset tgt
+			LEFT JOIN bronze.olist_sellers_dataset tgt
 			ON src.seller_id = tgt.seller_id
-			WHERE tgt.dwh_row_hash <> src.dwh_row_hash;
+			WHERE tgt.seller_id IS NULL;
 
-		-- Retrieve rows updated
-		SET @rows_updated = @@ROWCOUNT;
+			-- Retrieve rows inserted
+			SET @rows_inserted = @@ROWCOUNT;
 
-		-- Flag deleted records in bronze table
-		UPDATE tgt
-			SET
-				tgt.dwh_batch_id = @batch_id,
-				tgt.dwh_source_file = @source_object,
-				tgt.dwh_is_deleted = 1
-			FROM bronze.olist_sellers_dataset tgt
-			LEFT JOIN #staging_olist_sellers_dataset src
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE src.dwh_row_hash IS NULL;
+			-- Update outdated records in bronze table
+			UPDATE tgt
+				SET
+					tgt.seller_zip_code_prefix = src.seller_zip_code_prefix,
+					tgt.seller_city = src.seller_city,
+					tgt.seller_state = src.seller_state,
+					tgt.dwh_row_hash = src.dwh_row_hash,
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_sellers_dataset src
+				INNER JOIN bronze.olist_sellers_dataset tgt
+				ON src.seller_id = tgt.seller_id
+				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
+				OR tgt.dwh_is_deleted = 1;
 
-		-- Map values to variables on success
-		SET @step_end_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			-- Retrieve rows updated
+			SET @rows_updated = @@ROWCOUNT;
+
+			-- Flag deleted records in bronze table
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 1
+				FROM bronze.olist_sellers_dataset tgt
+				LEFT JOIN #staging_olist_sellers_dataset src
+				ON tgt.seller_id = src.seller_id
+				WHERE src.seller_id IS NULL
+				AND tgt.dwh_is_deleted = 0;
+		
+			-- Retrieve number of rows flagged as deleted
+			SET @rows_flagged = @@ROWCOUNT;
+
+			-- Map values to variables on success
+			SET @step_end_time = SYSDATETIME();
+			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+
+			-- Perform row-count reconciliation test
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50009, 'Row-count reconciliation failed', 9;
+		COMMIT TRAN;
+
+		-- Mark step as successful if it passes reconciliation step
 		SET @step_load_status = 'Successful';
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1551,7 +1742,8 @@ BEGIN
 				rows_extracted = @rows_extracted,
 				rows_inserted = @rows_inserted,
 				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
+				rows_unchanged = @rows_unchanged,
+				rows_flagged = @rows_flagged
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -1580,68 +1772,181 @@ BEGIN
 	END TRY
 
 	BEGIN CATCH
+		-- Rollback transaction if still active
+		IF XACT_STATE() <> 0 ROLLBACK TRAN;
+
 		-- Map values to step-level variables on failure
 		SET @error_time = SYSDATETIME();
 		SET @step_load_duration = DATEDIFF(second, @step_start_time, @error_time);
 		SET @step_load_status = 'Failed';
-
 		IF @rows_extracted IS NULL SET @rows_extracted = 0;
-		IF @rows_inserted IS NULL SET @rows_inserted = 0;
-		IF @rows_updated IS NULL SET @rows_updated = 0;
-		SET @rows_rejected = @rows_extracted - (@rows_inserted + @rows_updated);
+		SET @rows_inserted = 0;
+		SET @rows_updated = 0;
+		SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+		SET @rows_flagged = 0;
 
-		-- Update log details at step-level on failure
-		UPDATE etl.step_log
-			SET
-				step_end_time = @error_time,
-				step_load_duration_second = @step_load_duration,
-				step_load_status = @step_load_status,
-				rows_extracted = @rows_extracted,
-				rows_inserted = @rows_inserted,
-				rows_updated = @rows_updated,
-				rows_rejected = @rows_rejected
-			WHERE step_id = @step_id AND batch_id = @batch_id;
+		-- Load into log tables if batch_id is invalid
+		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
+			BEGIN
+				-- Map values to variables
+				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
+				SET @batch_load_status = 'Failed';
 
-		-- Map values to batch-level variables on failure
-		SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
-		SET @batch_load_status = 'Failed';
-		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-		SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
+				-- Load into batch log table
+				INSERT INTO etl.batch_log
+				(
+					batch_name,
+					batch_start_time,
+					batch_end_time,
+					batch_load_duration_second,
+					batch_load_status,
+					total_tables_loaded,
+					total_rows_processed,
+					total_rows_loaded
+				)
+				VALUES
+				(
+					@batch_name,
+					@batch_start_time,
+					@error_time,
+					@batch_load_duration,
+					@batch_load_status,
+					@total_tables_loaded,
+					@total_rows_processed,
+					@total_rows_loaded
+				);
 
-		-- Update log details at batch-level on failure
-		UPDATE etl.batch_log
-			SET
-				batch_end_time = @error_time,
-				batch_load_duration_second = @batch_load_duration,
-				batch_load_status = @batch_load_status,
-				total_tables_loaded = @total_tables_loaded,
-				total_rows_processed = @total_rows_processed,
-				total_rows_loaded = @total_rows_loaded
-			WHERE batch_id = @batch_id;
+				-- Capture recently generated batch_id
+				SET @batch_id = SCOPE_IDENTITY();
 
-		-- Insert into error log
-		INSERT INTO etl.error_log
-		(
-			batch_id,
-			step_id,
-			error_time,
-			rows_extracted,
-			rows_inserted,
-			rows_updated,
-			rows_rejected,
-			error_description
-		)
-		VALUES
-		(
-			@batch_id,
-			@step_id,
-			@error_time,
-			@rows_extracted,
-			@rows_inserted,
-			@rows_updated,
-			@rows_rejected,
-			ERROR_MESSAGE()
-		);
+				-- Load into step log table
+				INSERT INTO etl.step_log
+				(
+					batch_id,
+					layer,
+					step_name,
+					load_type,
+					source_object,
+					target_object,
+					step_start_time,
+					step_end_time,
+					step_load_duration_second,
+					step_load_status,
+					rows_extracted,
+					rows_inserted,
+					rows_updated,
+					rows_unchanged,
+					rows_flagged
+				)
+				VALUES
+				(
+					@batch_id,
+					@layer,
+					'N/A',
+					'N/A',
+					'N/A',
+					'N/A',
+					@batch_start_time,
+					@error_time,
+					@batch_load_duration,
+					@batch_load_status,
+					@rows_extracted,
+					@rows_inserted,
+					@rows_updated,
+					@rows_unchanged,
+					@rows_flagged
+				)
+
+				-- Capture recently generated step_id
+				SET @step_id = SCOPE_IDENTITY();
+
+				-- Load into error log table
+				INSERT INTO etl.error_log
+				(
+					batch_id,
+					step_id,
+					error_time,
+					rows_extracted,
+					rows_inserted,
+					rows_updated,
+					rows_unchanged,
+					rows_flagged,
+					error_description
+				)
+				VALUES
+				(
+					@batch_id,
+					@step_id,
+					@error_time,
+					@rows_extracted,
+					@rows_inserted,
+					@rows_updated,
+					@rows_unchanged,
+					@rows_flagged,
+					ERROR_MESSAGE()
+				);
+			END;
+		-- Otherwise load into log tables if batch_id is valid
+		ELSE
+			BEGIN
+				-- Update log details at step-level on failure
+				UPDATE etl.step_log
+					SET
+						step_end_time = @error_time,
+						step_load_duration_second = @step_load_duration,
+						step_load_status = @step_load_status,
+						rows_extracted = @rows_extracted,
+						rows_inserted = @rows_inserted,
+						rows_updated = @rows_updated,
+						rows_unchanged = @rows_unchanged,
+						rows_flagged = @rows_flagged
+					WHERE step_id = @step_id AND batch_id = @batch_id;
+
+				-- Map values to batch-level variables on failure
+				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
+				SET @batch_load_status = 'Failed';
+				SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+				SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
+				SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
+
+				-- Update log details at batch-level on failure
+				UPDATE etl.batch_log
+					SET
+						batch_end_time = @error_time,
+						batch_load_duration_second = @batch_load_duration,
+						batch_load_status = @batch_load_status,
+						total_tables_loaded = @total_tables_loaded,
+						total_rows_processed = @total_rows_processed,
+						total_rows_loaded = @total_rows_loaded
+					WHERE batch_id = @batch_id;
+
+				-- Insert into error log
+				INSERT INTO etl.error_log
+				(
+					batch_id,
+					step_id,
+					error_time,
+					rows_extracted,
+					rows_inserted,
+					rows_updated,
+					rows_unchanged,
+					rows_flagged,
+					error_description
+				)
+				VALUES
+				(
+					@batch_id,
+					@step_id,
+					@error_time,
+					@rows_extracted,
+					@rows_inserted,
+					@rows_updated,
+					@rows_unchanged,
+					@rows_flagged,
+					ERROR_MESSAGE()
+				);
+			END;
+
+		THROW;
 	END CATCH;
 END;
