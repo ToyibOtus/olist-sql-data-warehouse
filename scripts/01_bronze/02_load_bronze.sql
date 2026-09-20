@@ -439,12 +439,12 @@ BEGIN
 			-- Map values to variables on success
 			SET @step_end_time = SYSDATETIME();
 			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - @rows_inserted;
+			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
 			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
 			SET @total_rows_loaded = @total_rows_loaded + @rows_inserted;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_unchanged THROW 50002, 'Row-count reconciliation failed', 2;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50002, 'Row-count reconciliation failed', 2;
 		COMMIT TRAN;
 
 		-- Mark step as successful if it passes reconciliation step
