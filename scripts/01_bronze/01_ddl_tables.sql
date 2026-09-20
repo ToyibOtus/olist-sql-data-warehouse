@@ -23,6 +23,7 @@ Script Purpose:
 */
 -- Connect to OlistDatabase
 USE OlistDatabase;
+GO
 
 -- Drop all bronze tables if found
 IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'bronze')
