@@ -300,7 +300,7 @@ BEGIN
 		-- Map values to variables before transactions
 		SET @step_start_time = SYSDATETIME();
 		SET @step_name = 'load_olist_geolocation_dataset';
-		SET @load_type = 'Incremental Load: Insert & Soft-Delete Flag';
+		SET @load_type = 'Incremental Load: Insert, Update & Soft-Delete Flag';
 		SET @source_object = 'C:\Users\PC\Documents\Olist Store Datasets\olist_geolocation_dataset.csv';
 		SET @target_object = 'olist_geolocation_dataset';
 		SET @step_load_status = 'Running';
@@ -403,7 +403,22 @@ BEGIN
 			WHERE tgt.dwh_row_hash IS NULL;
 
 			-- Retrieve rows inserted
-			SET @rows_inserted = @@ROWCOUNT
+			SET @rows_inserted = @@ROWCOUNT;
+
+			-- Reactivate rows flagged as deleted
+			UPDATE tgt
+				SET
+					tgt.dwh_load_timestamp = SYSDATETIME(),
+					tgt.dwh_batch_id = @batch_id,
+					tgt.dwh_source_file = @source_object,
+					tgt.dwh_is_deleted = 0
+				FROM #staging_olist_geolocation_dataset src
+				INNER JOIN bronze.olist_geolocation_dataset tgt
+				ON src.dwh_row_hash = tgt.dwh_row_hash
+				WHERE tgt.dwh_row_hash = 1;
+			
+			-- Retrieve number of rows updated
+			SET @rows_updated = @@ROWCOUNT;
 
 			-- Flag deleted records in bronze table
 			UPDATE tgt
