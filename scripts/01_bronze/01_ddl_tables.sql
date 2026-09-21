@@ -67,8 +67,7 @@ CREATE TABLE bronze.olist_geolocation_dataset
 	dwh_row_hash BINARY(32) NOT NULL,
 	dwh_load_timestamp DATETIME2(0) DEFAULT SYSDATETIME() NOT NULL,
 	dwh_batch_id INT NOT NULL,
-	dwh_source_file NVARCHAR(250) NOT NULL,
-	dwh_is_deleted BIT NOT NULL DEFAULT 0
+	dwh_source_file NVARCHAR(250) NOT NULL
 );
 GO
 
