@@ -192,6 +192,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_customers_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_customers_dataset src INNER JOIN bronze.olist_customers_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_customers_dataset
@@ -262,19 +266,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation check
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50001, 'Row-count reconciliation failed', 1;			
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50001, 'Row-count reconciliation check failed', 1;			
 		COMMIT TRAN;
 
-		-- Mark step as successful if row-count reconcilation check passes
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -300,15 +301,15 @@ BEGIN
 		-- Map values to variables before transactions
 		SET @step_start_time = SYSDATETIME();
 		SET @step_name = 'load_olist_geolocation_dataset';
-		SET @load_type = 'Incremental Load: Insert, Update & Soft-Delete Flag';
+		SET @load_type = 'Full Load: Truncate & Insert';
 		SET @source_object = 'C:\Users\PC\Documents\Olist Store Datasets\olist_geolocation_dataset.csv';
 		SET @target_object = 'olist_geolocation_dataset';
 		SET @step_load_status = 'Running';
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
-		SET @rows_updated = 0;
-		SET @rows_unchanged = 0;
-		SET @rows_flagged = 0;
+		SET @rows_updated = NULL;
+		SET @rows_unchanged = NULL;
+		SET @rows_flagged = NULL;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -376,7 +377,10 @@ BEGIN
 
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
-			-- Load new records from staging to target table olist_geolocation_dataset
+			-- Delete all records in target table
+			TRUNCATE TABLE bronze.olist_geolocation_dataset;
+			
+			-- Load all records from source table into target
 			INSERT INTO bronze.olist_geolocation_dataset
 			(
 				geolocation_zip_code_prefix,
@@ -389,66 +393,29 @@ BEGIN
 				dwh_source_file
 			)
 			SELECT
-				src.geolocation_zip_code_prefix,
-				src.geolocation_lat,
-				src.geolocation_lng,
-				src.geolocation_city,
-				src.geolocation_state,
-				src.dwh_row_hash,
+				geolocation_zip_code_prefix,
+				geolocation_lat,
+				geolocation_lng,
+				geolocation_city,
+				geolocation_state,
+				dwh_row_hash,
 				@batch_id,
 				@source_object
-			FROM #staging_olist_geolocation_dataset src
-			LEFT JOIN bronze.olist_geolocation_dataset tgt
-			ON tgt.dwh_row_hash = src.dwh_row_hash
-			WHERE tgt.dwh_row_hash IS NULL;
+			FROM #staging_olist_geolocation_dataset;
 
 			-- Retrieve rows inserted
 			SET @rows_inserted = @@ROWCOUNT;
 
-			-- Reactivate rows flagged as deleted
-			UPDATE tgt
-				SET
-					tgt.dwh_load_timestamp = SYSDATETIME(),
-					tgt.dwh_batch_id = @batch_id,
-					tgt.dwh_source_file = @source_object,
-					tgt.dwh_is_deleted = 0
-				FROM #staging_olist_geolocation_dataset src
-				INNER JOIN bronze.olist_geolocation_dataset tgt
-				ON src.dwh_row_hash = tgt.dwh_row_hash
-				WHERE tgt.dwh_row_hash = 1;
-			
-			-- Retrieve number of rows updated
-			SET @rows_updated = @@ROWCOUNT;
-
-			-- Flag deleted records in bronze table
-			UPDATE tgt
-				SET
-					tgt.dwh_load_timestamp = SYSDATETIME(),
-					tgt.dwh_batch_id = @batch_id,
-					tgt.dwh_source_file = @source_object,
-					tgt.dwh_is_deleted = 1
-				FROM bronze.olist_geolocation_dataset tgt
-				LEFT JOIN #staging_olist_geolocation_dataset src
-				ON tgt.dwh_row_hash = src.dwh_row_hash
-				WHERE src.dwh_row_hash IS NULL
-				AND tgt.dwh_is_deleted = 0;
-		
-			-- Retrieve number of rows flagged as deleted
-			SET @rows_flagged = @@ROWCOUNT;
-
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + @rows_inserted;
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50002, 'Row-count reconciliation failed', 2;
+			IF @rows_extracted <> @rows_inserted THROW 50002, 'Row-count reconciliation check failed', 2;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + @rows_inserted;
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -457,10 +424,7 @@ BEGIN
 				step_load_duration_second = @step_load_duration,
 				step_load_status = @step_load_status,
 				rows_extracted = @rows_extracted,
-				rows_inserted = @rows_inserted,
-				rows_updated = @rows_updated,
-				rows_unchanged = @rows_unchanged,
-				rows_flagged = @rows_flagged
+				rows_inserted = @rows_inserted
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
@@ -550,6 +514,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_items_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_order_items_dataset src INNER JOIN bronze.olist_order_items_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_order_items_dataset
@@ -626,19 +594,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50003, 'Row-count reconciliation failed', 3;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50003, 'Row-count reconciliation check failed', 3;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -738,6 +703,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_payments_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_order_payments_dataset src INNER JOIN bronze.olist_order_payments_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_order_payments_dataset
@@ -808,19 +777,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50004, 'Row-count reconciliation failed', 4;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50004, 'Row-count reconciliation check failed', 4;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -923,6 +889,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_reviews_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_order_reviews_dataset src INNER JOIN bronze.olist_order_reviews_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_order_reviews_dataset
@@ -999,19 +969,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50005, 'Row-count reconciliation failed', 5;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50005, 'Row-count reconciliation check failed', 5;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1117,6 +1084,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_orders_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_orders_dataset src INNER JOIN bronze.olist_orders_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_orders_dataset
@@ -1194,19 +1165,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 	
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50006, 'Row-count reconciliation failed', 6;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50006, 'Row-count reconciliation check failed', 6;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1280,27 +1248,31 @@ BEGIN
 		SET @step_id = SCOPE_IDENTITY();
 
 		-- Create a temporary staging table #staging_olist_product_name_translation
-		CREATE TABLE #staging_olist_product_name_translation
+		CREATE TABLE #staging_olist_product_category_name_translation
 		(
 			product_category_name NVARCHAR(50),
 			product_category_name_english NVARCHAR(50)
 		);
 
 		-- Map BULK INSERT statement to variable @sql
-		SET @sql = 'BULK INSERT #staging_olist_product_name_translation FROM ''' + @source_object + ''' WITH 
+		SET @sql = 'BULK INSERT #staging_olist_product_category_name_translation FROM ''' + @source_object + ''' WITH 
 		(FORMAT = ''CSV'', FIRSTROW = 2, FIELDTERMINATOR = '','', ROWTERMINATOR = ''0x0A'', TABLOCK, CODEPAGE = ''65001'');';
 
 		-- Execute BULK INSERT statement
 		EXEC (@sql);
 
 		-- Add a computed column dwh row hash into staging table
-		ALTER TABLE #staging_olist_product_name_translation
+		ALTER TABLE #staging_olist_product_category_name_translation
 		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(product_category_name, '<NULL>'), 
 		COALESCE(product_category_name_english, '<NULL>'))) AS BINARY(32)) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
-		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_product_name_translation;
+		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_product_category_name_translation;
+
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_product_category_name_translation src INNER JOIN bronze.olist_product_category_name_translation tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
 
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
@@ -1319,7 +1291,7 @@ BEGIN
 				src.dwh_row_hash,
 				@batch_id,
 				@source_object
-			FROM #staging_olist_product_name_translation src
+			FROM #staging_olist_product_category_name_translation src
 			LEFT JOIN bronze.olist_product_category_name_translation tgt
 			ON src.product_category_name = tgt.product_category_name
 			WHERE tgt.product_category_name IS NULL;
@@ -1336,7 +1308,7 @@ BEGIN
 					tgt.dwh_batch_id = @batch_id,
 					tgt.dwh_source_file = @source_object,
 					tgt.dwh_is_deleted = 0
-				FROM #staging_olist_product_name_translation src
+				FROM #staging_olist_product_category_name_translation src
 				INNER JOIN bronze.olist_product_category_name_translation tgt
 				ON src.product_category_name = tgt.product_category_name
 				WHERE tgt.dwh_row_hash <> src.dwh_row_hash
@@ -1353,7 +1325,7 @@ BEGIN
 					tgt.dwh_source_file = @source_object,
 					tgt.dwh_is_deleted = 1
 				FROM bronze.olist_product_category_name_translation tgt
-				LEFT JOIN #staging_olist_product_name_translation src
+				LEFT JOIN #staging_olist_product_category_name_translation src
 				ON tgt.product_category_name = src.product_category_name
 				WHERE src.product_category_name IS NULL
 				AND tgt.dwh_is_deleted = 0;
@@ -1361,19 +1333,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 	
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50007, 'Row-count reconciliation failed', 7;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50007, 'Row-count reconciliation check failed', 7;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1389,7 +1358,7 @@ BEGIN
 			WHERE step_id = @step_id AND batch_id = @batch_id; 
 
 		-- Drop staging table
-		DROP TABLE IF EXISTS #staging_olist_product_name_translation;
+		DROP TABLE IF EXISTS #staging_olist_product_category_name_translation;
 
 
 		-- ========================================================
@@ -1479,6 +1448,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_products_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_products_dataset src INNER JOIN bronze.olist_products_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_products_dataset
@@ -1559,19 +1532,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50008, 'Row-count reconciliation failed', 8;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50008, 'Row-count reconciliation check failed', 8;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1669,6 +1639,10 @@ BEGIN
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_sellers_dataset;
 
+		-- Retrieve number of unchanged rows in target table
+		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_sellers_dataset src INNER JOIN bronze.olist_sellers_dataset tgt
+		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
 			-- Load new records from staging to target table olist_sellers_dataset
@@ -1734,19 +1708,16 @@ BEGIN
 			-- Retrieve number of rows flagged as deleted
 			SET @rows_flagged = @@ROWCOUNT;
 
-			-- Map values to variables on success
-			SET @step_end_time = SYSDATETIME();
-			SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
-			SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-			SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-			SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
-
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50009, 'Row-count reconciliation failed', 9;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50009, 'Row-count reconciliation check failed', 9;
 		COMMIT TRAN;
 
-		-- Mark step as successful if it passes reconciliation step
+		-- Mark step as successful & map values to variables if row-count reconcilation check passes
 		SET @step_load_status = 'Successful';
+		SET @step_end_time = SYSDATETIME();
+		SET @step_load_duration = DATEDIFF(second, @step_start_time, @step_end_time);
+		SET @total_rows_processed = @total_rows_processed + @rows_extracted;
+		SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 
 		-- Update log details at step-level on success
 		UPDATE etl.step_log
@@ -1769,9 +1740,9 @@ BEGIN
 		-- SECTION 4: CLOSE BATCH ON SUCCESS
 		-- =======================================================================================
 		-- Map values to variables
+		SET @batch_load_status = 'Successful';
 		SET @batch_end_time = SYSDATETIME();
-		SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @batch_end_time);
-		SET @batch_load_status = 'Successful'; 
+		SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @batch_end_time); 
 		SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE (batch_id = @batch_id AND step_load_status = 'Successful');
 
 		-- Update log details at batch-level on success
@@ -1791,21 +1762,22 @@ BEGIN
 		IF XACT_STATE() <> 0 ROLLBACK TRAN;
 
 		-- Map values to step-level variables on failure
+		SET @step_load_status = 'Failed';
 		SET @error_time = SYSDATETIME();
 		SET @step_load_duration = DATEDIFF(second, @step_start_time, @error_time);
-		SET @step_load_status = 'Failed';
 		IF @rows_extracted IS NULL SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+		IF @rows_unchanged IS NULL SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
+
 		SET @rows_flagged = 0;
 
 		-- Load into log tables if batch_id is invalid
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
 			BEGIN
 				-- Map values to variables
-				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
 				SET @batch_load_status = 'Failed';
+				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
 
 				-- Load into batch log table
 				INSERT INTO etl.batch_log
@@ -1918,8 +1890,8 @@ BEGIN
 					WHERE step_id = @step_id AND batch_id = @batch_id;
 
 				-- Map values to batch-level variables on failure
-				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
 				SET @batch_load_status = 'Failed';
+				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
 				SET @total_rows_processed = @total_rows_processed + @rows_extracted;
 				SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 				SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
