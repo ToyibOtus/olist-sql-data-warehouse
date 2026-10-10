@@ -1762,17 +1762,11 @@ BEGIN
 	END TRY
 
 	BEGIN CATCH
+		-- Capture error time
+		SET @error_time = SYSDATETIME();
+
 		-- Rollback transaction if still active
 		IF XACT_STATE() <> 0 ROLLBACK TRAN;
-
-		-- Map values to step-level variables on failure
-		SET @step_load_status = 'Failed';
-		SET @error_time = SYSDATETIME();
-		SET @step_load_duration = DATEDIFF(second, @step_start_time, @error_time);
-		IF @rows_extracted IS NULL SET @rows_extracted = 0;
-		SET @rows_inserted = 0;
-		SET @rows_updated = 0;
-		SET @rows_flagged = 0; 
 
 		-- Load into log tables if batch_id is invalid
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
@@ -1878,6 +1872,14 @@ BEGIN
 		-- Otherwise load into log tables if batch_id is valid
 		ELSE
 			BEGIN
+				-- Map values to step-level variables on failure
+				SET @step_load_status = 'Failed';
+				SET @step_load_duration = DATEDIFF(second, @step_start_time, @error_time);
+				IF @rows_extracted IS NULL SET @rows_extracted = 0;
+				SET @rows_inserted = 0;
+				SET @rows_updated = 0;
+				SET @rows_flagged = 0; 
+
 				-- Update log details at step-level on failure
 				UPDATE etl.step_log
 					SET
