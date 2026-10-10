@@ -70,7 +70,10 @@ BEGIN
 	@error_time DATETIME2(0),
 
 	-- Holds SQL queries (BULK INSERT)
-	@sql NVARCHAR(MAX);
+	@sql NVARCHAR(MAX),
+
+	-- Holds row counts
+	@unchanged_row_counter BIT = 0;
 
 
 	-- =======================================================================================
@@ -185,9 +188,9 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_customers_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(customer_id, '<NULL>'), COALESCE(customer_unique_id, '<NULL>'), COALESCE(CAST(customer_zip_code_prefix AS NVARCHAR(10)), '<NULL>'),
-		COALESCE(customer_city, '<NULL>'), COALESCE(customer_state, '<NULL>'))) AS BINARY(32)) PERSISTED; 
+		COALESCE(customer_city, '<NULL>'), COALESCE(customer_state, '<NULL>'))) PERSISTED; 
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_customers_dataset;
@@ -367,10 +370,10 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_geolocation_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(CAST(geolocation_zip_code_prefix AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(CAST(geolocation_lat AS NVARCHAR(30)), '<NULL>'), COALESCE(CAST(geolocation_lng AS NVARCHAR(30)), '<NULL>'), 
-		COALESCE(geolocation_city, '<NULL>'), COALESCE(geolocation_state, '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(geolocation_city, '<NULL>'), COALESCE(geolocation_state, '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_geolocation_dataset;
@@ -506,10 +509,10 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_items_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(order_id, '<NULL>'), COALESCE(CAST(order_item_id AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(product_id, '<NULL>'), COALESCE(seller_id, '<NULL>'), COALESCE(CONVERT(NVARCHAR(30), shipping_limit_date, 120), '<NULL>'), 
-		COALESCE(CAST(price AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(freight_value AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CAST(price AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(freight_value AS NVARCHAR(10)), '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_items_dataset;
@@ -695,10 +698,10 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_payments_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(order_id, '<NULL>'), COALESCE(CAST(payment_sequential AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(payment_type, '<NULL>'), COALESCE(CAST(payment_installments AS NVARCHAR(10)), '<NULL>'), 
-		COALESCE(CAST(payment_value AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CAST(payment_value AS NVARCHAR(10)), '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_payments_dataset;
@@ -880,11 +883,11 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_order_reviews_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(review_id, '<NULL>'), COALESCE(order_id, '<NULL>'), COALESCE(CAST(review_score AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(review_comment_title, '<NULL>'), COALESCE(review_comment_message, '<NULL>'), 
 		COALESCE(CONVERT(NVARCHAR(30), review_creation_date, 120), '<NULL>'), 
-		COALESCE(CONVERT(NVARCHAR(30), review_answer_timestamp, 120), '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CONVERT(NVARCHAR(30), review_answer_timestamp, 120), '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_order_reviews_dataset;
@@ -1073,13 +1076,13 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_orders_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(order_id, '<NULL>'), COALESCE(customer_id, '<NULL>'), COALESCE(order_status, '<NULL>'), 
 		COALESCE(CONVERT(NVARCHAR(30), order_purchase_timestamp, 120), '<NULL>'), 
 		COALESCE(CONVERT(NVARCHAR(30), order_approved_at, 120), '<NULL>'), 
 		COALESCE(CONVERT(NVARCHAR(30), order_delivered_carrier_date, 120), '<NULL>'), 
 		COALESCE(CONVERT(NVARCHAR(30), order_delivered_customer_date, 120), '<NULL>'), 
-		COALESCE(CONVERT(NVARCHAR(30), order_estimated_delivery_date, 120), '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CONVERT(NVARCHAR(30), order_estimated_delivery_date, 120), '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_orders_dataset;
@@ -1263,9 +1266,9 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_product_category_name_translation
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(product_category_name, '<NULL>'), 
-		COALESCE(product_category_name_english, '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(product_category_name_english, '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_product_category_name_translation;
@@ -1273,6 +1276,7 @@ BEGIN
 		-- Retrieve number of unchanged rows in target table
 		SELECT @rows_unchanged = COUNT(*) FROM #staging_olist_product_category_name_translation src INNER JOIN bronze.olist_product_category_name_translation tgt
 		ON tgt.dwh_row_hash = src.dwh_row_hash WHERE tgt.dwh_is_deleted = 0;
+
 
 		-- Wrap target-table related transactions in a TRAN block to enable ROLLBACK on error
 		BEGIN TRAN;
@@ -1438,12 +1442,12 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_products_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', 
 		CONCAT_WS('|', COALESCE(product_id, '<NULL>'), COALESCE(product_category_name, '<NULL>'),
 		COALESCE(CAST(product_name_length AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_description_length AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(CAST(product_photos_qty AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_weight_g AS NVARCHAR(10)), '<NULL>'), 
 		COALESCE(CAST(product_length_cm AS NVARCHAR(10)), '<NULL>'), COALESCE(CAST(product_height_cm AS NVARCHAR(10)), '<NULL>'), 
-		COALESCE(CAST(product_width_cm AS NVARCHAR(10)), '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(CAST(product_width_cm AS NVARCHAR(10)), '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_products_dataset;
@@ -1632,9 +1636,9 @@ BEGIN
 
 		-- Add a computed column dwh row hash into staging table
 		ALTER TABLE #staging_olist_sellers_dataset
-		ADD dwh_row_hash AS CAST(HASHBYTES('SHA2_256', CONCAT_WS('|', 
+		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(seller_id, '<NULL>'), COALESCE(CAST(seller_zip_code_prefix AS NVARCHAR(10)), '<NULL>'), 
-		COALESCE(seller_city, '<NULL>'), COALESCE(seller_state, '<NULL>'))) AS BINARY(32)) PERSISTED;
+		COALESCE(seller_city, '<NULL>'), COALESCE(seller_state, '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
 		SELECT @rows_extracted = COUNT(*) FROM #staging_olist_sellers_dataset;
@@ -1768,9 +1772,7 @@ BEGIN
 		IF @rows_extracted IS NULL SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
 		SET @rows_updated = 0;
-		IF @rows_unchanged IS NULL SET @rows_unchanged = @rows_extracted - (@rows_inserted + @rows_updated);
-
-		SET @rows_flagged = 0;
+		SET @rows_flagged = 0; 
 
 		-- Load into log tables if batch_id is invalid
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
