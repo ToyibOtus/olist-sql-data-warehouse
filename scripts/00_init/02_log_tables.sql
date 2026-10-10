@@ -22,6 +22,7 @@ Warning:
 */
 -- Connect to OlistDatabase
 USE OlistDatabase;
+GO
 
 -- Drop existing log tables if found
 IF EXISTS (SELECT 1 FROM sys.tables WHERE name IN ('dq_log', 'error_log', 'step_log', 'batch_log'))
@@ -84,9 +85,9 @@ CREATE TABLE etl.error_log
 	error_time DATETIME2(0) NOT NULL,
 	rows_extracted INT NOT NULL,
 	rows_inserted INT NOT NULL,
-	rows_updated INT NOT NULL,
-	rows_unchanged INT NOT NULL,
-	rows_flagged INT NOT NULL,
+	rows_updated INT,
+	rows_unchanged INT,
+	rows_flagged INT,
 	error_description NVARCHAR(MAX) NOT NULL,
 	CONSTRAINT fk_error_log_step_id FOREIGN KEY(step_id) REFERENCES etl.step_log (step_id)
 );
