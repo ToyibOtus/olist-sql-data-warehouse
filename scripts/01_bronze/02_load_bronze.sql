@@ -114,6 +114,9 @@ BEGIN
 		-- Verify existence of @batch_id in batch log table and return an error if not found
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
 		THROW 50010, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
+
+		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND NOT batch_load_status = 'Running')
+		THROW 50011, 'Existing batch_id: This batch has run its full cycle and cannot be reused.', 11;
 		
 		-- ========================================================
 		-- STEP 1: Load Olist Customers Dataset 
@@ -1769,7 +1772,7 @@ BEGIN
 		IF XACT_STATE() <> 0 ROLLBACK TRAN;
 
 		-- Load into log tables if batch_id is invalid
-		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
+		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_load_status = 'Running')
 			BEGIN
 				-- Map values to variables
 				SET @batch_load_status = 'Failed';
@@ -1896,9 +1899,8 @@ BEGIN
 				-- Map values to batch-level variables on failure
 				SET @batch_load_status = 'Failed';
 				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
-				SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-				SET @total_rows_loaded = @total_rows_loaded + (@rows_inserted + @rows_updated);
 				SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
+				SET @total_rows_processed = @total_rows_processed + @rows_extracted;
 
 				-- Update log details at batch-level on failure
 				UPDATE etl.batch_log
