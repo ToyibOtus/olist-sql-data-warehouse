@@ -135,7 +135,7 @@ BEGIN
 		END;
 
 		-- If @batch_id  exists, belongs to this very same batch, and load status suggests an incompleted batch,
-		-- flag @batch_uncompleted as incompleted
+		-- flag @batch_incompleted as incompleted
 		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name = @batch_name AND batch_load_status = 'Running')
 		SET @batch_incompleted = 1;
 		
