@@ -134,7 +134,7 @@ BEGIN
 			THROW 50011, 'Existing batch_id: This batch has run its full cycle and cannot be reused.', 11;
 		END;
 
-		-- If @batch_id  exists, belongs to this very same batch, and load status suggests an uncompleted batch,
+		-- If @batch_id  exists, belongs to this very same batch, and load status suggests an incompleted batch,
 		-- flag @batch_uncompleted as incompleted
 		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name = @batch_name AND batch_load_status = 'Running')
 		SET @batch_incompleted = 1;
