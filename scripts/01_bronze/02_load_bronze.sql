@@ -72,8 +72,14 @@ BEGIN
 	-- Holds SQL queries (BULK INSERT)
 	@sql NVARCHAR(MAX),
 
-	-- Holds row counts
-	@unchanged_row_counter BIT = 0;
+	-- Indicates if batch_id is self-generated (0 if externally-generated, and 1 if otherwise)
+	@owns_batch BIT = 0,
+	
+	-- Indicates validity of batch_id (0 if valid, and 1 if invalid)
+	@batch_rejected BIT = 0,
+	
+	-- Indicates if batch has run its full cycle or not (0 if batch status is Running, 1 if otherwise)
+	@batch_incompleted BIT = 0;
 
 
 	-- =======================================================================================
@@ -104,6 +110,9 @@ BEGIN
 
 		-- Retrieve recently generated batch id
 		SET @batch_id = SCOPE_IDENTITY();
+
+		-- Flag batch as self-generated
+		SET @owns_batch = 1;
 	END;
 
 
@@ -113,10 +122,22 @@ BEGIN
 	BEGIN TRY
 		-- Verify existence of @batch_id in batch log table and return an error if not found
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
-		THROW 50010, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
+		BEGIN
+			SET @batch_rejected = 1;
+			THROW 50010, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
+		END;
 
-		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND NOT batch_load_status = 'Running')
-		THROW 50011, 'Existing batch_id: This batch has run its full cycle and cannot be reused.', 11;
+		-- If @batch_id exists, verify its load status and abort if batch has been used
+		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_load_status <> 'Running')
+		BEGIN
+			SET @batch_rejected = 1;
+			THROW 50011, 'Existing batch_id: This batch has run its full cycle and cannot be reused.', 11;
+		END;
+
+		-- If @batch_id  exists, belongs to this very same batch, and load status suggests an uncompleted batch,
+		-- flag @batch_uncompleted as incompleted
+		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name = @batch_name AND batch_load_status = 'Running')
+		SET @batch_incompleted = 1;
 		
 		-- ========================================================
 		-- STEP 1: Load Olist Customers Dataset 
@@ -313,9 +334,6 @@ BEGIN
 		SET @step_load_status = 'Running';
 		SET @rows_extracted = 0;
 		SET @rows_inserted = 0;
-		SET @rows_updated = NULL;
-		SET @rows_unchanged = NULL;
-		SET @rows_flagged = NULL;
 
 		-- Load log details at step-level
 		INSERT INTO etl.step_log
@@ -329,10 +347,7 @@ BEGIN
 			step_start_time,
 			step_load_status,
 			rows_extracted,
-			rows_inserted,
-			rows_updated,
-			rows_unchanged,
-			rows_flagged
+			rows_inserted
 		)
 		VALUES
 		(
@@ -345,10 +360,7 @@ BEGIN
 			@step_start_time,
 			@step_load_status,
 			@rows_extracted,
-			@rows_inserted,
-			@rows_updated,
-			@rows_unchanged,
-			@rows_flagged
+			@rows_inserted
 		);
 
 		-- Retrieve recently generated step id
@@ -1746,22 +1758,27 @@ BEGIN
 		-- =======================================================================================
 		-- SECTION 4: CLOSE BATCH ON SUCCESS
 		-- =======================================================================================
-		-- Map values to variables
-		SET @batch_load_status = 'Successful';
-		SET @batch_end_time = SYSDATETIME();
-		SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @batch_end_time); 
-		SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE (batch_id = @batch_id AND step_load_status = 'Successful');
 
-		-- Update log details at batch-level on success
-		UPDATE etl.batch_log
-			SET
-				batch_end_time = @batch_end_time,
-				batch_load_duration_second = @batch_load_duration,
-				batch_load_status = @batch_load_status,
-				total_tables_loaded = @total_tables_loaded,
-				total_rows_processed = @total_rows_processed,
-				total_rows_loaded = @total_rows_loaded
-			WHERE batch_id = @batch_id;
+		-- Load into batch log table if batch_id is self-generated, or batch is incompleted
+		IF @owns_batch = 1 OR @batch_incompleted = 1
+		BEGIN
+			-- Map values to variables
+			SET @batch_load_status = 'Successful';
+			SET @batch_end_time = SYSDATETIME();
+			SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @batch_end_time); 
+			SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE (batch_id = @batch_id AND step_load_status = 'Successful');
+
+			-- Update log details at batch-level on success
+			UPDATE etl.batch_log
+				SET
+					batch_end_time = @batch_end_time,
+					batch_load_duration_second = @batch_load_duration,
+					batch_load_status = @batch_load_status,
+					total_tables_loaded = @total_tables_loaded,
+					total_rows_processed = @total_rows_processed,
+					total_rows_loaded = @total_rows_loaded
+				WHERE batch_id = @batch_id;
+		END;
 	END TRY
 
 	BEGIN CATCH
@@ -1772,7 +1789,7 @@ BEGIN
 		IF XACT_STATE() <> 0 ROLLBACK TRAN;
 
 		-- Load into log tables if batch_id is invalid
-		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_load_status = 'Running')
+		IF @batch_rejected = 1
 			BEGIN
 				-- Map values to variables
 				SET @batch_load_status = 'Failed';
@@ -1852,11 +1869,6 @@ BEGIN
 					batch_id,
 					step_id,
 					error_time,
-					rows_extracted,
-					rows_inserted,
-					rows_updated,
-					rows_unchanged,
-					rows_flagged,
 					error_description
 				)
 				VALUES
@@ -1864,11 +1876,6 @@ BEGIN
 					@batch_id,
 					@step_id,
 					@error_time,
-					@rows_extracted,
-					@rows_inserted,
-					@rows_updated,
-					@rows_unchanged,
-					@rows_flagged,
 					ERROR_MESSAGE()
 				);
 			END;
@@ -1895,23 +1902,27 @@ BEGIN
 						rows_unchanged = @rows_unchanged,
 						rows_flagged = @rows_flagged
 					WHERE step_id = @step_id AND batch_id = @batch_id;
+				
+				-- Load into batch log table if batch_id is self-generated, or batch is incompleted
+				IF @owns_batch = 1 OR @batch_incompleted = 1
+				BEGIN
+					-- Map values to batch-level variables on failure
+					SET @batch_load_status = 'Failed';
+					SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
+					SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
+					SET @total_rows_processed = @total_rows_processed + @rows_extracted;
 
-				-- Map values to batch-level variables on failure
-				SET @batch_load_status = 'Failed';
-				SET @batch_load_duration = DATEDIFF(second, @batch_start_time, @error_time);
-				SELECT @total_tables_loaded = COUNT(*) FROM etl.step_log WHERE batch_id = @batch_id AND step_load_status = 'Successful';
-				SET @total_rows_processed = @total_rows_processed + @rows_extracted;
-
-				-- Update log details at batch-level on failure
-				UPDATE etl.batch_log
-					SET
-						batch_end_time = @error_time,
-						batch_load_duration_second = @batch_load_duration,
-						batch_load_status = @batch_load_status,
-						total_tables_loaded = @total_tables_loaded,
-						total_rows_processed = @total_rows_processed,
-						total_rows_loaded = @total_rows_loaded
-					WHERE batch_id = @batch_id;
+					-- Update log details at batch-level on failure
+					UPDATE etl.batch_log
+						SET
+							batch_end_time = @error_time,
+							batch_load_duration_second = @batch_load_duration,
+							batch_load_status = @batch_load_status,
+							total_tables_loaded = @total_tables_loaded,
+							total_rows_processed = @total_rows_processed,
+							total_rows_loaded = @total_rows_loaded
+						WHERE batch_id = @batch_id;
+				END;
 
 				-- Insert into error log
 				INSERT INTO etl.error_log
@@ -1919,11 +1930,6 @@ BEGIN
 					batch_id,
 					step_id,
 					error_time,
-					rows_extracted,
-					rows_inserted,
-					rows_updated,
-					rows_unchanged,
-					rows_flagged,
 					error_description
 				)
 				VALUES
@@ -1931,11 +1937,6 @@ BEGIN
 					@batch_id,
 					@step_id,
 					@error_time,
-					@rows_extracted,
-					@rows_inserted,
-					@rows_updated,
-					@rows_unchanged,
-					@rows_flagged,
 					ERROR_MESSAGE()
 				);
 			END;
