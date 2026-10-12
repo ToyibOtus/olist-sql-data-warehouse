@@ -67,9 +67,9 @@ CREATE TABLE etl.step_log
 	step_load_status NVARCHAR(50) NOT NULL,
 	rows_extracted INT NOT NULL,
 	rows_inserted INT NOT NULL,
-	rows_updated INT,
-	rows_unchanged INT,
-	rows_flagged INT,
+	rows_updated INT NOT NULL DEFAULT 0,
+	rows_unchanged INT NOT NULL DEFAULT 0,
+	rows_flagged INT NOT NULL DEFAULT 0,
 	CONSTRAINT fk_step_log_batch_id FOREIGN KEY (batch_id) REFERENCES etl.batch_log (batch_id),
 	CONSTRAINT chk_step_log_layer CHECK(layer IN ('Bronze', 'Silver', 'Gold')),
 	CONSTRAINT chk_step_log_step_load_status CHECK(step_load_status IN ('Running', 'Successful', 'Failed'))
@@ -83,11 +83,6 @@ CREATE TABLE etl.error_log
 	batch_id INT NOT NULL,
 	step_id INT NULL,
 	error_time DATETIME2(0) NOT NULL,
-	rows_extracted INT NOT NULL,
-	rows_inserted INT NOT NULL,
-	rows_updated INT,
-	rows_unchanged INT,
-	rows_flagged INT,
 	error_description NVARCHAR(MAX) NOT NULL,
 	CONSTRAINT fk_error_log_step_id FOREIGN KEY(step_id) REFERENCES etl.step_log (step_id)
 );
