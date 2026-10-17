@@ -19,7 +19,7 @@ Note:
 	Default value of parameter (@batch_id) is NULL, as the script generates its own batch_id and
 	passes the value into @batch_id. And it should be noted that the parameter is designed to only
 	accept a value from the orchestrator proc itself. Manually passing a value, be it a non-existing
-	batch, an existing but closed batch, and an externally-generated batch outside of the orchestrator,
+	batch, an existing but closed batch, and a once self-generated batch with an incomplete lifecycle,
 	returns an error.
 =========================================================================================================
 */
