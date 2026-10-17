@@ -122,21 +122,21 @@ BEGIN
 		IF NOT EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id)
 		BEGIN
 			SET @batch_rejected = 1;
-			THROW 50010, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
+			THROW 50001, 'Invalid batch_id: batch does not exist in etl.batch_log.', 1;
 		END;
 
 		-- If @batch_id exists, verify its load status and abort if batch has been used
 		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_load_status <> 'Running')
 		BEGIN
 			SET @batch_rejected = 1;
-			THROW 50011, 'Closed batch_id: This batch has run its full cycle and cannot be reused.', 11;
+			THROW 50002, 'Closed batch_id: This batch has run its full cycle and cannot be reused.', 2;
 		END;
 
 		-- If @batch_id is passed into manually, return an error
 		IF @owns_batch = 0 AND EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name <> 'etl.run_pipeline')
 		BEGIN
 			SET @batch_rejected = 1;
-			THROW 50012, 'Unrecognized batch_id: batch_id can only either be self-generated or passed into by the orchestrator proc etl.run_pipeline.', 12;
+			THROW 50003, 'Unrecognized batch_id: batch_id can only either be self-generated or passed into by the orchestrator proc etl.run_pipeline.', 3;
 		END;
 		
 		-- ========================================================
@@ -294,7 +294,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation check
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50001, 'Row-count reconciliation check failed', 1;			
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50004, 'Row-count reconciliation check failed', 4;			
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -425,7 +425,7 @@ BEGIN
 			SET @rows_inserted = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted THROW 50002, 'Row-count reconciliation check failed', 2;
+			IF @rows_extracted <> @rows_inserted THROW 50005, 'Row-count reconciliation check failed', 5;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -613,7 +613,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50003, 'Row-count reconciliation check failed', 3;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50006, 'Row-count reconciliation check failed', 6;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -796,7 +796,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50004, 'Row-count reconciliation check failed', 4;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50007, 'Row-count reconciliation check failed', 7;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -988,7 +988,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50005, 'Row-count reconciliation check failed', 5;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50008, 'Row-count reconciliation check failed', 8;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -1184,7 +1184,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 	
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50006, 'Row-count reconciliation check failed', 6;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50009, 'Row-count reconciliation check failed', 9;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -1353,7 +1353,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 	
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50007, 'Row-count reconciliation check failed', 7;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50010, 'Row-count reconciliation check failed', 10;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -1552,7 +1552,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50008, 'Row-count reconciliation check failed', 8;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50011, 'Row-count reconciliation check failed', 11;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
@@ -1728,7 +1728,7 @@ BEGIN
 			SET @rows_flagged = @@ROWCOUNT;
 
 			-- Perform row-count reconciliation test
-			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50009, 'Row-count reconciliation check failed', 9;
+			IF @rows_extracted <> @rows_inserted + @rows_updated + @rows_unchanged THROW 50012, 'Row-count reconciliation check failed', 12;
 		COMMIT TRAN;
 
 		-- Mark step as successful & map values to variables if row-count reconcilation check passes
