@@ -1,10 +1,10 @@
 /*
-==================================================================================================
+=========================================================================================================
 Script: 02_load_bronze  (Source --> Bronze)
 Location: scripts/01_bronze/
 Author: Otusanya Toyib
 Created At: 2026-08-08
-==================================================================================================
+=========================================================================================================
 Script Purpose:
 	This script loads records from each source file (CSV) into their corresponding target bronze
 	tables. The entire operation is treated as a batch, with multitude of steps (9 to be precise)
@@ -17,10 +17,11 @@ Usage: EXEC bronze.load_bronze
 
 Note:
 	Default value of parameter (@batch_id) is NULL, as the script generates its own batch_id and
-	passes the value into @batch_id. And it should be noted that no random value should be passed 
-	into @batch_id, as this will not only return an error if the value doesn't exist in batch log 
-	table, but will ruin the integrity of the data passed into each log table.
-==================================================================================================
+	passes the value into @batch_id. And it should be noted that the parameter is designed to only
+	accept a value from the orchestrator proc itself. Manually passing a value, be it a non-existing
+	batch, an existing but closed batch, and an externally-generated batch outside of the orchestrator,
+	returns an error.
+=========================================================================================================
 */
 -- Connect to OlistDatabase
 USE OlistDatabase;
@@ -76,10 +77,7 @@ BEGIN
 	@owns_batch BIT = 0,
 	
 	-- Indicates validity of batch_id (0 if valid, and 1 if invalid)
-	@batch_rejected BIT = 0,
-	
-	-- Indicates if batch has run its full cycle or not (0 if batch status is Running, 1 if otherwise)
-	@batch_incompleted BIT = 0;
+	@batch_rejected BIT = 0;
 
 
 	-- =======================================================================================
@@ -131,13 +129,15 @@ BEGIN
 		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_load_status <> 'Running')
 		BEGIN
 			SET @batch_rejected = 1;
-			THROW 50011, 'Existing batch_id: This batch has run its full cycle and cannot be reused.', 11;
+			THROW 50011, 'Closed batch_id: This batch has run its full cycle and cannot be reused.', 11;
 		END;
 
-		-- If @batch_id  exists, belongs to this very same batch, and load status suggests an incompleted batch,
-		-- flag @batch_incompleted as incompleted
-		IF EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name = @batch_name AND batch_load_status = 'Running')
-		SET @batch_incompleted = 1;
+		-- If @batch_id is passed into manually, return an error
+		IF @owns_batch = 0 AND EXISTS(SELECT 1 FROM etl.batch_log WHERE batch_id = @batch_id AND batch_name <> 'etl.run_pipeline')
+		BEGIN
+			SET @batch_rejected = 1;
+			THROW 50012, 'Unrecognized batch_id: batch_id can only either be self-generated or passed into by the orchestrator proc etl.run_pipeline.', 12;
+		END;
 		
 		-- ========================================================
 		-- STEP 1: Load Olist Customers Dataset 
@@ -387,7 +387,7 @@ BEGIN
 		ALTER TABLE #staging_olist_geolocation_dataset
 		ADD dwh_row_hash AS HASHBYTES('SHA2_256', CONCAT_WS('|', 
 		COALESCE(CAST(geolocation_zip_code_prefix AS NVARCHAR(10)), '<NULL>'), 
-		COALESCE(CAST(geolocation_lat AS NVARCHAR(30)), '<NULL>'), COALESCE(CAST(geolocation_lng AS NVARCHAR(30)), '<NULL>'), 
+		COALESCE(CONVERT(NVARCHAR(30), geolocation_lat, 3), '<NULL>'), COALESCE(CONVERT(NVARCHAR(30), geolocation_lng, 3), '<NULL>'), 
 		COALESCE(geolocation_city, '<NULL>'), COALESCE(geolocation_state, '<NULL>'))) PERSISTED;
 
 		-- Extract total number of records loaded into staging table
@@ -1759,8 +1759,8 @@ BEGIN
 		-- SECTION 4: CLOSE BATCH ON SUCCESS
 		-- =======================================================================================
 
-		-- Load into batch log table if batch_id is self-generated, or batch is incompleted
-		IF @owns_batch = 1 OR @batch_incompleted = 1
+		-- Load into batch log table if batch_id is self-generated
+		IF @owns_batch = 1
 		BEGIN
 			-- Map values to variables
 			SET @batch_load_status = 'Successful';
@@ -1903,8 +1903,8 @@ BEGIN
 						rows_flagged = @rows_flagged
 					WHERE step_id = @step_id AND batch_id = @batch_id;
 				
-				-- Load into batch log table if batch_id is self-generated, or batch is incompleted
-				IF @owns_batch = 1 OR @batch_incompleted = 1
+				-- Load into batch log table if batch_id is self-generated
+				IF @owns_batch = 1
 				BEGIN
 					-- Map values to batch-level variables on failure
 					SET @batch_load_status = 'Failed';
