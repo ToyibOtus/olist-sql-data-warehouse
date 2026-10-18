@@ -103,7 +103,7 @@ CREATE TABLE etl.dq_log
 	dq_description NVARCHAR(MAX) NULL,
 	CONSTRAINT fk_dq_log_batch_id FOREIGN KEY (batch_id) REFERENCES etl.batch_log (batch_id),
 	CONSTRAINT fk_dq_log_step_id FOREIGN KEY (step_id) REFERENCES etl.step_log (step_id),
-	CONSTRAINT chk_dq_log_check_severity CHECK(check_severity IN ('Info', 'Warning', 'Critical')),
+	CONSTRAINT chk_dq_log_check_severity CHECK(check_severity IN ('Info', 'Minor', 'Critical')),
 	CONSTRAINT chk_dq_log_dq_status CHECK(dq_status IN ('Warning', 'Failed', 'Successful'))
 );
 GO
